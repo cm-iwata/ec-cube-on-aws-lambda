@@ -168,3 +168,7 @@ services:
         # Symfony\Bridge\Twig\Extension\RoutingExtensionの後に登録するため,
         # autoconfigureはfalseにし, CompilerPassで追加する.
         autoconfigure: false
+    Symfony\Component\HttpFoundation\Session\Storage\Handler\PdoSessionHandler:
+        public: false
+        arguments:
+             - '%env(DATABASE_URL)%'

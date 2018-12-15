@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: My PHP Application
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      InstanceTenancy: default
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: ap-northeast-1a
+      MapPublicIpOnLaunch: true
+  SubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: ap-northeast-1c
+      MapPublicIpOnLaunch: true
+  VPCInternetGateway:
+    Type: AWS::EC2::InternetGateway
+  VPCAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref VPCInternetGateway
+  VPCPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC      
+  VPCRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCInternetGateway
+    Properties:
+      RouteTableId: !Ref VPCPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VPCInternetGateway
+  SubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref VPCPublicRouteTable
+  SubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetC
+      RouteTableId: !Ref VPCPublicRouteTable 
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda Security Group      
+      VpcId: !Ref VPC
+  LambdaSecurityGroupMySQL:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+  LambdaSecurityGroupHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+  MyDBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: EC-DB Subnet 
+      SubnetIds: 
+        - !Ref SubnetA
+        - !Ref SubnetC
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      VPCSecurityGroups:
+      - Ref: LambdaSecurityGroup
+      AllocatedStorage: 20
+      DBInstanceClass: db.t2.micro
+      Engine: mysql
+      EngineVersion: 5.7.22
+      MasterUsername: root
+      MasterUserPassword: hogehogehoge
+      DBSubnetGroupName: !Ref MyDBSubnetGroup
+      DBName: eccube      
+    DeletionPolicy: Delete
+  AssetBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+    DeletionPolicy: Delete
+  AssetBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref 'AssetBucket'
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Join ['', ['arn:aws:s3:::', !Ref 'AssetBucket', /*]]
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref LambdaSecurityGroup
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetC
+      Type: application
+  phpserver:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: PHP Webserver
+      CodeUri: index.php
+      Runtime: provided
+      Handler: index.php
+      MemorySize: 512
+      Timeout: 30
+      Tracing: Active
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+           - Effect: Allow
+             Action:
+               - ec2:CreateNetworkInterface
+               - ec2:DescribeNetworkInterfaces
+               - ec2:DeleteNetworkInterface
+             Resource: '*'        
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref SubnetA
+          - !Ref SubnetC
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:887080169480:layer:php71:5
+        # 自作したレイヤーのARNを設定する             
+        - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:eccube_ext:1
+        - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:php71_bootstrap_ex:1
+      Environment:
+        Variables:
+          APP_ENV: prod
+          APP_DEBUG: 0
+          DATABASE_URL:
+            !Sub
+              - "mysql://root:hogehogehoge@${EndPoint}/eccube"
+              - { EndPoint : !GetAtt Database.Endpoint.Address}
+          # ローカルでEC-CUBEをインストールした際に作成された.envファイルを参考に設定する
+          DATABASE_SERVER_VERSION: 5
+          MAILER_URL: "null://localhost"
+          ECCUBE_AUTH_MAGIC: "CfBrHLRvvuPAb8an"
+          ECCUBE_ADMIN_ROUTE: "admin"
+          ECCUBE_TEMPLATE_CODE: default
+          ECCUBE_LOCALE: ja
+          S3_ASSET_BUCKET_NAME: !Ref AssetBucket
